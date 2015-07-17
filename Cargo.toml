@@ -16,3 +16,8 @@ time = "*"
 cookie = "*"
 plugin = "*"
 typemap = "*"
+lazy_static = "*"
+
+[[example]]
+name = "example"
+path = "examples/example.rs"
