@@ -1,6 +1,7 @@
 use std::any::Any;
-use nickel::{Response, Middleware, MiddlewareResult};
+use nickel::{Request, Response, Middleware, MiddlewareResult};
 use nickel::status::StatusCode::Forbidden;
+use nickel_session as session;
 use current_user::{SessionUser, CurrentUser};
 
 pub trait AuthorizeSession {
@@ -24,7 +25,7 @@ impl<P, M> Authorize<P, M> {
     pub fn only<D>(permission: P, access_granted: M) -> Authorize<P, M>
     where M: Middleware<D> + Send + Sync + 'static,
           D: SessionUser,
-          D::Store: Any,
+          D::Session: Any,
           D::User: AuthorizeSession<Permissions=P>,
           P: 'static + Send + Sync {
         Authorize {
@@ -36,7 +37,7 @@ impl<P, M> Authorize<P, M> {
     pub fn any<D>(permissions: Vec<P>, access_granted: M) -> Authorize<P, M>
     where M: Middleware<D> + Send + Sync + 'static,
           D: SessionUser,
-          D::Store: Any,
+          D::Session: Any,
           D::User: AuthorizeSession<Permissions=P>,
           P: 'static + Send + Sync {
         Authorize {
@@ -48,7 +49,7 @@ impl<P, M> Authorize<P, M> {
     pub fn all<D>(permissions: Vec<P>, access_granted: M) -> Authorize<P, M>
     where M: Middleware<D> + Send + Sync + 'static,
           D: SessionUser,
-          D::Store: Any,
+          D::Session: Any,
           D::User: AuthorizeSession<Permissions=P>,
           P: 'static + Send + Sync {
         Authorize {
@@ -60,13 +61,13 @@ impl<P, M> Authorize<P, M> {
 
 impl<P, M, D> Middleware<D> for Authorize<P, M>
 where M: Middleware<D> + Send + Sync + 'static,
-      D: SessionUser,
-      D::Store: Any,
+      D: SessionUser + Any,
+      D::Session: Any,
       D::User: AuthorizeSession<Permissions=P> + Any,
       P: 'static + Send + Sync {
-    fn invoke<'a, 'b>(&'a self, mut res: Response<'a, 'b, D>) -> MiddlewareResult<'a, 'b, D> {
+    fn invoke<'mw, 'server>(&'mw self, req: &mut Request<'mw, 'server, D>, mut res: Response<'mw, D>) -> MiddlewareResult<'mw, D> {
         let allowed = {
-            let current_user = res.current_user();
+            let current_user = CurrentUser::get(req, &mut res).ok();
             let check = <D::User as AuthorizeSession>::has_permission;
             match self.permissions {
                 Permit::Only(ref p) => check(current_user, p),
@@ -76,7 +77,7 @@ where M: Middleware<D> + Send + Sync + 'static,
         };
 
         if allowed {
-            self.access_granted.invoke(res)
+            self.access_granted.invoke(req, res)
         } else {
             res.error(Forbidden, "Access denied.")
         }

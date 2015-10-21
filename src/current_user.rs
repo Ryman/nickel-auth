@@ -1,41 +1,41 @@
 use std::any::Any;
-use nickel::{Response, SessionStore};
-use plugin::{Plugin, Pluggable};
+use nickel::{Request, Response};
+use nickel_session as session;
+use plugin::Extensible;
 use typemap::Key;
 use std::marker::PhantomData;
+use std::fmt::Debug;
 
-pub trait SessionUser : SessionStore {
-    type User;
+pub trait SessionUser : session::Store {
+    type User: Debug;
+    type UserError: Debug;
 
-    fn current_user(&mut Response<Self>) -> Option<Self::User>;
-}
-
-pub trait CurrentUser {
-    type User;
-
-    fn current_user(&mut self) -> Option<&Self::User>;
-}
-
-impl<'a, 'k, D> CurrentUser for Response<'a, 'k, D>
-    where D: SessionUser,
-          D::User: Any {
-    type User = D::User;
-
-    fn current_user(&mut self) -> Option<&Self::User> {
-        self.get_ref::<CurrentUserPlugin<Self::User>>().ok()
-    }
+    fn current_user(&mut Request<Self>, &mut Response<Self>) -> Result<Self::User, Self::UserError>;
 }
 
 // Plugin boilerplate
-pub struct CurrentUserPlugin<T: 'static + Any>(PhantomData<T>);
-impl<T: 'static + Any> Key for CurrentUserPlugin<T> { type Value = T; }
+pub struct CachedCurrentUser<T: 'static + Any>(PhantomData<T>);
+impl<D> Key for CachedCurrentUser<D>
+where D: SessionUser + Any,
+      D::User: Any {
+        type Value = D::User;
+}
 
-impl<'a, 'k, D, T> Plugin<Response<'a, 'k, D>> for CurrentUserPlugin<T>
-where T: 'static + Any,
-      D: SessionUser<User=T> {
-    type Error = ();
+pub struct CurrentUser;
+impl CurrentUser {
+    pub fn get<'a, D>(req: &mut Request<D>, res: &'a mut Response<D>) -> Result<&'a D::User, D::UserError>
+    where D: SessionUser + Any,
+          D::User: Any {
+        use typemap::Entry::{Occupied, Vacant};
 
-    fn eval(res: &mut Response<'a, 'k, D>) -> Result<T, ()> {
-        <D as SessionUser>::current_user(res).ok_or(())
+        if res.extensions().contains::<CachedCurrentUser<D>>() {
+            return Ok(res.extensions_mut().get::<CachedCurrentUser<D>>().unwrap())
+        }
+
+        let user = try!(D::current_user(req, res));
+        match res.extensions_mut().entry::<CachedCurrentUser<D>>() {
+            Vacant(entry) => Ok(entry.insert(user)),
+            Occupied(..) => unreachable!()
+        }
     }
 }

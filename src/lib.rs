@@ -1,4 +1,5 @@
 #[macro_use] extern crate nickel;
+extern crate nickel_session;
 extern crate plugin;
 extern crate typemap;
 

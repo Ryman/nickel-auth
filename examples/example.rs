@@ -1,12 +1,17 @@
-#[macro_use] extern crate nickel;
 #[macro_use] extern crate lazy_static;
-extern crate rustc_serialize;
+#[macro_use] extern crate nickel;
+extern crate nickel_cookies;
+extern crate nickel_session;
 extern crate nickel_auth;
+extern crate rustc_serialize;
 extern crate time;
 
 use std::io::Write;
 use nickel::*;
 use nickel::status::StatusCode;
+use nickel_session as session;
+use nickel_session::{Session, CookieSession};
+use nickel_cookies as cookies;
 use nickel_auth::{Authorize, CurrentUser, SessionUser};
 use time::Duration;
 
@@ -28,16 +33,10 @@ impl AppSession {
     }
 }
 
-static SECRET_KEY: &'static cookies::SecretKey = &cookies::SecretKey([0; 32]);
+impl cookies::KeyProvider for ServerData {}
 
-impl AsRef<cookies::SecretKey> for ServerData {
-    fn as_ref(&self) -> &cookies::SecretKey {
-        SECRET_KEY
-    }
-}
-
-impl SessionStore for ServerData {
-    type Store = AppSession;
+impl session::Store for ServerData {
+    type Session = AppSession;
 
     fn timeout() -> Duration {
         Duration::seconds(5)
@@ -46,12 +45,13 @@ impl SessionStore for ServerData {
 
 impl SessionUser for ServerData {
     type User = User;
+    type UserError = ();
 
-    fn current_user<'a>(res: &'a mut Response<Self>) -> Option<Self::User> {
+    fn current_user(req: &mut Request<Self>, res: &mut Response<Self>) -> Result<Self::User, Self::UserError> {
         // Search the database for current user
-        let user_id = res.session().user_id;
+        let user_id = CookieSession::get_mut(req, res).user_id;
 
-        user_id.and_then(|user_id| user::DATABASE.get(user_id as usize).cloned())
+        user_id.and_then(|user_id| user::DATABASE.get(user_id as usize).cloned()).ok_or(())
 
         // .. could fall back to looking `remember me` cookie here
     }
@@ -61,35 +61,35 @@ impl SessionUser for ServerData {
 fn main() {
     let mut server = Nickel::with_data(ServerData);
 
-    server.utilize(middleware! { |mut res| <ServerData>
-        let login_attempts = res.session().login_attempts;
-        let username = res.current_user().map(|user| user.name.clone());
+    server.utilize(middleware! { |req, mut res| <ServerData>
+        let login_attempts = CookieSession::get_mut(req, &mut res).login_attempts;
+        let username = CurrentUser::get(req, &mut res).map(|user| &user.name);
 
         println!("access to '{:?}' by {:?} with {} login attempts",
-                 res.request.origin.uri,
+                 req.origin.uri,
                  username,
                  login_attempts);
     });
 
     // Anyone should be able to reach this route.
-    server.get("/", middleware! { |mut res|
-        format!("You are logged in as: {:?}\n", res.current_user())
+    server.get("/", middleware! { |req, mut res|
+        format!("You are logged in as: {:?}\n", CurrentUser::get(req, &mut res).ok())
     });
 
-    server.post("/login", middleware! { |mut res| <ServerData>
+    server.post("/login", middleware! { |req, mut res| <ServerData>
         #[derive(RustcDecodable, RustcEncodable, Debug)]
         struct LoginRequest {
             name: String,
             password: String,
         }
 
-        res.session_mut().register_login_attempt();
+        CookieSession::get_mut(req, &mut res).register_login_attempt();
 
-        if let Ok(u) = res.request.json_as::<LoginRequest>() {
+        if let Ok(u) = req.json_as::<LoginRequest>() {
             // Search database for a matching login
             if let Some(id) = user::DATABASE.iter().position(|db| db.name == u.name
                                                           && db.password == u.password) {
-                res.session_mut().user_id = Some(id as u64);
+                CookieSession::get_mut(req, &mut res).user_id = Some(id as u64);
 
                 return res.send("Successfully logged in.")
             }
@@ -101,8 +101,8 @@ fn main() {
     server.get("/secret", Authorize::any(vec![Permission::User(Access::Read, "foo".into())],
                                          middleware! { "Some hidden information!\n" }));
 
-    fn custom_403<'a>(err: &mut NickelError<ServerData>) -> Action {
-        if let Some(ref mut res) = err.response_mut() {
+    fn custom_403<'a>(err: &mut NickelError<ServerData>, _: &mut Request<ServerData>) -> Action {
+        if let Some(ref mut res) = err.stream {
             if res.status() == StatusCode::Forbidden {
                 let _ = res.write_all(b"Access denied!\n");
                 return Halt(())
@@ -113,7 +113,7 @@ fn main() {
     }
 
     // issue #20178
-    let custom_handler: fn(&mut NickelError<ServerData>) -> Action = custom_403;
+    let custom_handler: fn(&mut NickelError<ServerData>, &mut Request<ServerData>) -> Action = custom_403;
 
     server.handle_error(custom_handler);
 
